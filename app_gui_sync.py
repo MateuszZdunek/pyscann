@@ -1,8 +1,17 @@
 import threading, queue, ipaddress, tkinter as tk
 from tkinter import ttk, messagebox
-from scanner_core_sync import scan_subnet, DEFAULT_PORTS, PORT_DESC  # PORT_DESC z poprzedniej wersji
+from scanner_core_sync import scan_subnet, DEFAULT_PORTS
 
 QUE_POLL_MS = 80
+
+PORT_DESC = {
+    22:   "SSH",
+    80:   "HTTP",
+    443:  "HTTPS",
+    3389: "RDP",
+    8080: "HTTP-alt",
+    8443: "HTTPS-alt",
+}
 
 class ScannerApp(tk.Tk):
     def __init__(self):
@@ -26,12 +35,8 @@ class ScannerApp(tk.Tk):
         self.ent_ports.insert(0, ",".join(map(str, DEFAULT_PORTS)))
         self.ent_ports.grid(row=1, column=1, padx=5)
 
-        ttk.Button(top, text="Scan", command=self.start_scan).grid(
-            row=0, column=2, rowspan=2, padx=5
-        )
-        ttk.Button(top, text="Stop", command=self.stop_scan).grid(
-            row=0, column=3, rowspan=2, padx=5
-        )
+        ttk.Button(top, text="Scan", command=self.start_scan).grid(row=0, column=2, rowspan=2, padx=5)
+        ttk.Button(top, text="Stop", command=self.stop_scan).grid(row=0, column=3, rowspan=2, padx=5)
 
         self.pbar = ttk.Progressbar(top, length=250, mode="determinate")
         self.pbar.grid(row=0, column=4, rowspan=2, padx=10)
@@ -42,11 +47,9 @@ class ScannerApp(tk.Tk):
         self.tree = ttk.Treeview(self, columns=cols, show="headings")
         for c in cols:
             self.tree.heading(c, text=c.upper())
-            self.tree.column(c, anchor="w",
-                             width=150 if c != "banner" else 480)
+            self.tree.column(c, anchor="w", width=150 if c != "banner" else 480)
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # ---------- control ----------
     def start_scan(self):
         subnet = self.ent_sub.get().strip()
         try:
@@ -62,16 +65,13 @@ class ScannerApp(tk.Tk):
         self.pbar.configure(maximum=net.num_addresses, value=0)
         self.lbl_status.config(text="Starting…")
 
-        threading.Thread(
-            target=self.worker_scan, args=(subnet, ports), daemon=True
-        ).start()
+        threading.Thread(target=self.worker_scan, args=(subnet, ports), daemon=True).start()
         self.after(QUE_POLL_MS, self.process_queue)
 
     def stop_scan(self):
         self.stop_flag.set()
         self.lbl_status.config(text="Stopped by user")
 
-    # ---------- worker ----------
     def worker_scan(self, subnet, ports):
         data = scan_subnet(subnet, ports, self.stop_flag)
         for host in data:
@@ -82,7 +82,6 @@ class ScannerApp(tk.Tk):
             self.task_q.put(("progress",))
         self.task_q.put(("done",))
 
-    # ---------- queue -> GUI ----------
     def process_queue(self):
         try:
             while True:
