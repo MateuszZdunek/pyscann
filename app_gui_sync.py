@@ -73,14 +73,17 @@ class ScannerApp(tk.Tk):
         self.lbl_status.config(text="Stopped by user")
 
     def worker_scan(self, subnet, ports):
-        data = scan_subnet(subnet, ports, self.stop_flag)
-        for host in data:
-            for p in host["ports"]:
-                desc = PORT_DESC.get(p["port"], "")
-                port_txt = f"{p['port']} ({desc})" if desc else str(p['port'])
-                self.task_q.put(("row", host["ip"], port_txt, p["banner"][:120]))
-            self.task_q.put(("progress",))
-        self.task_q.put(("done",))
+        try:
+            data = scan_subnet(subnet, ports, self.stop_flag)
+            for host in data:
+                for p in host["ports"]:
+                    desc = PORT_DESC.get(p["port"], "")
+                    port_txt = f"{p['port']} ({desc})" if desc else str(p['port'])
+                    self.task_q.put(("row", host["ip"], port_txt, p["banner"][:120]))
+                self.task_q.put(("progress",))
+            self.task_q.put(("done",))
+        except Exception as e:
+            self.task_q.put(("error", str(e)))
 
     def process_queue(self):
         try:
@@ -93,6 +96,10 @@ class ScannerApp(tk.Tk):
                     self.pbar.step(1)
                 elif tag == "done":
                     self.pbar.stop()
+                elif tag == "error":
+                    self.pbar.stop()
+                    self.lbl_status.config(text="Error occurred")
+                    messagebox.showerror("Scan Error", payload[0])
         except queue.Empty:
             pass
         if not self.stop_flag.is_set():
