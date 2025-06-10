@@ -1,15 +1,20 @@
-# app_gui_sync.py
-import threading, tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from scanner_core_sync import scan_subnet, DEFAULT_PORTS
+# app_gui_sync.py  –  wersja z paskiem postępu i bieżącymi wpisami
+import threading, queue, ipaddress, tkinter as tk
+from tkinter import ttk, messagebox
+from scanner_core_sync import scan_port, DEFAULT_PORTS      # korzystamy z pojedynczego scan_port
+                                                             # żeby móc aktualizować postęp host-po-hoście
+
+QUE_POLL_MS = 100           # co ile ms główny wątek sprawdza kolejkę
 
 class ScannerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Simple Network Scanner")
-        self.geometry("750x460")
+        self.geometry("800x520")
         self._build_widgets()
+        self.task_q: queue.Queue = queue.Queue()
 
+    # ---------- widżety ----------
     def _build_widgets(self):
         frm = ttk.Frame(self, padding=10)
         frm.pack(fill="x")
@@ -28,14 +33,19 @@ class ScannerApp(tk.Tk):
             row=0, column=2, rowspan=2, padx=10
         )
 
-        self.tree = ttk.Treeview(self, columns=("port", "banner"), show="headings")
-        self.tree.heading("port", text="Port")
-        self.tree.heading("banner", text="Banner / Info")
-        self.tree.column("port", width=60, anchor="center")
-        self.tree.column("banner", width=620)
+        # pasek postępu
+        self.pbar = ttk.Progressbar(frm, length=250, mode="determinate")
+        self.pbar.grid(row=0, column=3, rowspan=2, padx=10)
+
+        # tabela
+        cols = ("ip", "port", "banner")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings")
+        for c in cols:
+            self.tree.heading(c, text=c.upper())
+            self.tree.column(c, anchor="w", width=120 if c != "banner" else 500)
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # ---------- scanning ----------
+    # ---------- obsługa skanowania ----------
     def start_scan(self):
         subnet = self.ent_sub.get().strip()
         try:
@@ -43,25 +53,50 @@ class ScannerApp(tk.Tk):
         except ValueError:
             messagebox.showerror("Error", "Ports must be comma-separated integers")
             return
+
         self.tree.delete(*self.tree.get_children())
+        self.task_q.queue.clear()                # czyścimy kolejkę
+        net = ipaddress.ip_network(subnet, strict=False)
+        self.pbar.configure(maximum=net.num_addresses, value=0)
+
+        # wątek roboczy
         threading.Thread(
-            target=self.run_scan,
-            args=(subnet, ports),
+            target=self.worker_scan,
+            args=(net, ports, self.task_q),
             daemon=True
         ).start()
 
-    def run_scan(self, subnet, ports):
-        data = scan_subnet(subnet, ports)
-        # wrzucamy wyniki do GUI w wątku głównym (tk is not thread-safe)
-        self.after(0, self.populate_tree, data)
+        # cykliczne sprawdzanie kolejki
+        self.after(QUE_POLL_MS, self.process_queue)
 
-    def populate_tree(self, data):
-        for host in data:
-            for p in host["ports"]:
-                self.tree.insert(
-                    "", "end",
-                    values=(f"{host['ip']}:{p['port']}", p["banner"][:80])
-                )
+    @staticmethod
+    def worker_scan(net: ipaddress.IPv4Network, ports, q: queue.Queue):
+        for ip in net:
+            ip_str = str(ip)
+            for p in ports:
+                res = scan_port(ip_str, p)
+                if res:
+                    q.put(("row", ip_str, res["port"], res["banner"][:100]))
+            q.put(("progress",))            # jedno „tik” po przeskanowaniu hosta
+        q.put(("done",))
+
+    def process_queue(self):
+        try:
+            while True:
+                item = self.task_q.get_nowait()
+                tag = item[0]
+                if tag == "row":
+                    _, ip, port, banner = item
+                    self.tree.insert("", "end", values=(ip, port, banner))
+                elif tag == "progress":
+                    self.pbar.step(1)
+                elif tag == "done":
+                    self.pbar.stop()
+        except queue.Empty:
+            # nic w kolejce – sprawdzimy znowu za QUE_POLL_MS
+            pass
+        finally:
+            self.after(QUE_POLL_MS, self.process_queue)
 
 if __name__ == "__main__":
     ScannerApp().mainloop()
