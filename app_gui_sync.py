@@ -1,51 +1,52 @@
-# app_gui_sync.py  –  wersja z paskiem postępu i bieżącymi wpisami
 import threading, queue, ipaddress, tkinter as tk
 from tkinter import ttk, messagebox
-from scanner_core_sync import scan_port, DEFAULT_PORTS      # korzystamy z pojedynczego scan_port
-                                                             # żeby móc aktualizować postęp host-po-hoście
+from scanner_core_sync import scan_subnet, DEFAULT_PORTS, PORT_DESC  # PORT_DESC z poprzedniej wersji
 
-QUE_POLL_MS = 100           # co ile ms główny wątek sprawdza kolejkę
+QUE_POLL_MS = 80
 
 class ScannerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Simple Network Scanner")
-        self.geometry("800x520")
-        self._build_widgets()
+        self.geometry("830x560")
+        self.stop_flag = threading.Event()
         self.task_q: queue.Queue = queue.Queue()
+        self._build_widgets()
 
-    # ---------- widżety ----------
     def _build_widgets(self):
-        frm = ttk.Frame(self, padding=10)
-        frm.pack(fill="x")
+        top = ttk.Frame(self, padding=10); top.pack(fill="x")
 
-        ttk.Label(frm, text="Subnet (CIDR):").grid(row=0, column=0, sticky="w")
-        self.ent_sub = ttk.Entry(frm, width=25)
+        ttk.Label(top, text="Subnet (CIDR):").grid(row=0, column=0, sticky="w")
+        self.ent_sub = ttk.Entry(top, width=25)
         self.ent_sub.insert(0, "192.168.1.0/24")
         self.ent_sub.grid(row=0, column=1, padx=5)
 
-        ttk.Label(frm, text="Ports:").grid(row=1, column=0, sticky="w")
-        self.ent_ports = ttk.Entry(frm, width=25)
+        ttk.Label(top, text="Ports:").grid(row=1, column=0, sticky="w")
+        self.ent_ports = ttk.Entry(top, width=25)
         self.ent_ports.insert(0, ",".join(map(str, DEFAULT_PORTS)))
         self.ent_ports.grid(row=1, column=1, padx=5)
 
-        ttk.Button(frm, text="Scan", command=self.start_scan).grid(
-            row=0, column=2, rowspan=2, padx=10
+        ttk.Button(top, text="Scan", command=self.start_scan).grid(
+            row=0, column=2, rowspan=2, padx=5
+        )
+        ttk.Button(top, text="Stop", command=self.stop_scan).grid(
+            row=0, column=3, rowspan=2, padx=5
         )
 
-        # pasek postępu
-        self.pbar = ttk.Progressbar(frm, length=250, mode="determinate")
-        self.pbar.grid(row=0, column=3, rowspan=2, padx=10)
+        self.pbar = ttk.Progressbar(top, length=250, mode="determinate")
+        self.pbar.grid(row=0, column=4, rowspan=2, padx=10)
+        self.lbl_status = ttk.Label(top, text="Ready", width=35)
+        self.lbl_status.grid(row=0, column=5, rowspan=2)
 
-        # tabela
         cols = ("ip", "port", "banner")
         self.tree = ttk.Treeview(self, columns=cols, show="headings")
         for c in cols:
             self.tree.heading(c, text=c.upper())
-            self.tree.column(c, anchor="w", width=120 if c != "banner" else 500)
+            self.tree.column(c, anchor="w",
+                             width=150 if c != "banner" else 480)
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # ---------- obsługa skanowania ----------
+    # ---------- control ----------
     def start_scan(self):
         subnet = self.ent_sub.get().strip()
         try:
@@ -54,48 +55,48 @@ class ScannerApp(tk.Tk):
             messagebox.showerror("Error", "Ports must be comma-separated integers")
             return
 
+        self.stop_flag.clear()
         self.tree.delete(*self.tree.get_children())
-        self.task_q.queue.clear()                # czyścimy kolejkę
+        self.task_q.queue.clear()
         net = ipaddress.ip_network(subnet, strict=False)
         self.pbar.configure(maximum=net.num_addresses, value=0)
+        self.lbl_status.config(text="Starting…")
 
-        # wątek roboczy
         threading.Thread(
-            target=self.worker_scan,
-            args=(net, ports, self.task_q),
-            daemon=True
+            target=self.worker_scan, args=(subnet, ports), daemon=True
         ).start()
-
-        # cykliczne sprawdzanie kolejki
         self.after(QUE_POLL_MS, self.process_queue)
 
-    @staticmethod
-    def worker_scan(net: ipaddress.IPv4Network, ports, q: queue.Queue):
-        for ip in net:
-            ip_str = str(ip)
-            for p in ports:
-                res = scan_port(ip_str, p)
-                if res:
-                    q.put(("row", ip_str, res["port"], res["banner"][:100]))
-            q.put(("progress",))            # jedno „tik” po przeskanowaniu hosta
-        q.put(("done",))
+    def stop_scan(self):
+        self.stop_flag.set()
+        self.lbl_status.config(text="Stopped by user")
 
+    # ---------- worker ----------
+    def worker_scan(self, subnet, ports):
+        data = scan_subnet(subnet, ports, self.stop_flag)
+        for host in data:
+            for p in host["ports"]:
+                desc = PORT_DESC.get(p["port"], "")
+                port_txt = f"{p['port']} ({desc})" if desc else str(p['port'])
+                self.task_q.put(("row", host["ip"], port_txt, p["banner"][:120]))
+            self.task_q.put(("progress",))
+        self.task_q.put(("done",))
+
+    # ---------- queue -> GUI ----------
     def process_queue(self):
         try:
             while True:
-                item = self.task_q.get_nowait()
-                tag = item[0]
+                tag, *payload = self.task_q.get_nowait()
                 if tag == "row":
-                    _, ip, port, banner = item
-                    self.tree.insert("", "end", values=(ip, port, banner))
+                    ip, port_txt, banner = payload
+                    self.tree.insert("", "end", values=(ip, port_txt, banner))
                 elif tag == "progress":
                     self.pbar.step(1)
                 elif tag == "done":
                     self.pbar.stop()
         except queue.Empty:
-            # nic w kolejce – sprawdzimy znowu za QUE_POLL_MS
             pass
-        finally:
+        if not self.stop_flag.is_set():
             self.after(QUE_POLL_MS, self.process_queue)
 
 if __name__ == "__main__":

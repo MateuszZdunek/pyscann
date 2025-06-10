@@ -1,15 +1,16 @@
-# scanner_core_sync.py
-import ipaddress, json, socket, concurrent.futures
+# --- nowa wersja ---
+import socket, concurrent.futures, ipaddress
 from typing import List, Dict, Iterable
 
 DEFAULT_PORTS = [22, 80, 443, 3389, 8080, 8443]
-SOCKET_TIMEOUT = 1.0                  # sekundy
+SOCKET_TIMEOUT = 0.3                   # było 1.0
+HOST_WORKERS   = 400                   # było 100
+PORT_WORKERS   = 10                    # równoległe porty w obrębie hosta
 
-def scan_port(ip: str, port: int) -> Dict | None:
-    """Zwraca info o otwartym porcie lub None, jeśli zamknięty."""
+def scan_port(ip: str, port: int, timeout=SOCKET_TIMEOUT) -> Dict | None:
     try:
-        with socket.create_connection((ip, port), timeout=SOCKET_TIMEOUT) as s:
-            s.settimeout(0.5)
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(0.2)
             banner = ""
             if port in (80, 8080, 8000):
                 s.sendall(b"HEAD / HTTP/1.0\r\n\r\n")
@@ -22,41 +23,24 @@ def scan_port(ip: str, port: int) -> Dict | None:
 
 def scan_host(ip: str, ports: Iterable[int]) -> Dict:
     open_ports = []
-    for p in ports:
-        res = scan_port(ip, p)
-        if res:
-            open_ports.append(res)
+    # pool per-host → scanujemy porty jednocześnie
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PORT_WORKERS) as ppool:
+        fut_to_port = {ppool.submit(scan_port, ip, p): p for p in ports}
+        for fut in concurrent.futures.as_completed(fut_to_port):
+            res = fut.result()
+            if res:
+                open_ports.append(res)
     return {"ip": ip, "ports": open_ports}
 
-def scan_subnet(subnet: str,
-                ports: List[int] | None = None,
-                max_workers: int = 100) -> List[Dict]:
-    ports = ports or DEFAULT_PORTS
+def scan_subnet(subnet: str, ports: List[int], stop_flag, max_workers=HOST_WORKERS):
+    results = []
     net = ipaddress.ip_network(subnet, strict=False)
-    results: List[Dict] = []
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_ip = {
-            pool.submit(scan_host, str(ip), ports): str(ip) for ip in net
-        }
-        for fut in concurrent.futures.as_completed(future_to_ip):
+        fut_to_ip = {pool.submit(scan_host, str(ip), ports): str(ip) for ip in net}
+        for fut in concurrent.futures.as_completed(fut_to_ip):
+            if stop_flag.is_set():          # użytkownik kliknął „Stop”
+                break
             host_data = fut.result()
             if host_data["ports"]:
                 results.append(host_data)
     return results
-
-if __name__ == "__main__":
-    import argparse, pprint
-    ap = argparse.ArgumentParser(description="Prosty skaner TCP (synchroniczny)")
-    ap.add_argument("subnet", help="CIDR, np. 192.168.1.0/24")
-    ap.add_argument("-p", "--ports", help="22,80,443 lub puste (domyślne)")
-    args = ap.parse_args()
-
-    if args.ports:
-        ports = list(map(int, args.ports.split(",")))
-    else:
-        ports = DEFAULT_PORTS
-
-    data = scan_subnet(args.subnet, ports)
-    pprint.pp(data)
-    json.dump(data, open("scan.json", "w"), indent=2)
